@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>免費活動拍貼錄影機</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111; color: #fff; overflow: hidden; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; }
+        .camera-container { position: relative; width: 100vw; height: calc(100vh - 120px); max-width: 500px; overflow: hidden; background: #000; }
+        video#video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+        .filter-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; z-index: 10; }
+        
+        /* 控制區 */
+        .controls { height: 120px; display: flex; align-items: center; justify-content: space-around; width: 100%; max-width: 500px; background: #000; z-index: 20; padding: 0 40px; }
+        .btn { border: none; border-radius: 50%; cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 10px rgba(0,0,0,0.3); font-weight: bold; font-size: 14px; transition: all 0.2s; }
+        .btn:active { transform: scale(0.9); }
+        
+        /* 拍照按鈕 */
+        #photo-btn { width: 70px; height: 70px; background: #fff; color: #000; border: 5px solid #444; }
+        /* 錄影按鈕 */
+        #video-btn { width: 70px; height: 70px; background: #ff3b30; color: #fff; border: 5px solid #444; }
+        #video-btn.recording { background: #fff; color: #ff3b30; border-color: #ff3b30; border-radius: 10px; animation: pulse 1s infinite; }
+        
+        @keyframes pulse {
+            0% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+            100% { transform: scale(1); }
+        }
+
+        /* 彈出預覽視窗 */
+        .preview-modal { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.95); z-index: 100; flex-direction: column; align-items: center; justify-content: center; padding: 20px; }
+        .preview-content { max-width: 100%; max-height: 70vh; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); display: none; }
+        .tip-text { margin-top: 15px; color: #fff; font-size: 15px; text-align: center; background: rgba(255,255,255,0.2); padding: 8px 16px; border-radius: 20px; max-width: 90%; }
+        .action-btn { margin-top: 15px; padding: 12px 30px; background: #4cd964; border: none; color: #fff; border-radius: 25px; font-size: 16px; font-weight: bold; cursor: pointer; display: none; text-decoration: none; }
+        .close-btn { margin-top: 15px; padding: 10px 25px; background: #555; border: none; color: #fff; border-radius: 20px; font-size: 14px; cursor: pointer; }
+    </style>
+</head>
+<body>
+
+    <!-- 相機畫面區 -->
+    <div class="camera-container">
+        <video id="video" autoplay playsinline muted></video>
+        <!-- 你的濾鏡圖層 -->
+        <img src="filter.png" class="filter-overlay" id="filter-img" alt="Filter">
+    </div>
+
+    <!-- 控制區 -->
+    <div class="controls">
+        <button class="btn" id="photo-btn">拍照</button>
+        <button class="btn" id="video-btn">錄影</button>
+    </div>
+
+    <!-- 照片/影片 生成後的預覽視窗 -->
+    <div class="preview-modal" id="preview-modal">
+        <img class="preview-content" id="preview-img" alt="預覽照片">
+        <video class="preview-content" id="preview-video" controls playsinline loop></video>
+        
+        <div class="tip-text" id="tip-text">💡 提示訊息</div>
+        <a class="action-btn" id="download-btn" href="#" download="my-video.mp4">下載儲存影片</a>
+        <button class="close-btn" id="close-btn">返回重拍</button>
+    </div>
+
+    <!-- 隱藏的計算畫布 -->
+    <canvas id="canvas" style="display:none;"></canvas>
+
+    <script>
+        const video = document.getElementById('video');
+        const photoBtn = document.getElementById('photo-btn');
+        const videoBtn = document.getElementById('video-btn');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const filterImg = document.getElementById('filter-img');
+        
+        const previewModal = document.getElementById('preview-modal');
+        const previewImg = document.getElementById('preview-img');
+        const previewVideo = document.getElementById('preview-video');
+        const tipText = document.getElementById('tip-text');
+        const downloadBtn = document.getElementById('download-btn');
+        const closeBtn = document.getElementById('close-btn');
+
+        let mediaRecorder;
+        let recordedChunks = [];
+        let isRecording = false;
+        let localStream;
+
+        // 1. 同時要求相機與麥克風權限
+        navigator.mediaDevices.getUserMedia({
+            video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: true
+        })
+        .then(stream => { 
+            localStream = stream;
+            video.srcObject = stream; 
+        })
+        .catch(err => { 
+            alert("無法開啟相機或麥克風，請確保已允許權限，且網址為 HTTPS 安全連線。"); 
+        });
+
+        // 2. 畫布渲染循環：不斷將相機畫面與濾鏡合成到畫布上，這樣錄影才能錄到濾鏡
+        canvas.width = 720;
+        canvas.height = 1280;
+
+        function drawFrame() {
+            if (video.paused || video.ended) return;
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 鏡像翻轉相機畫面（自拍習慣）
+            ctx.translate(canvas.width, 0);
+            ctx.scale(-1, 1);
+            
+            // 計算比例裁切成 9:16
+            const videoWidth = video.videoWidth;
+            const videoHeight = video.videoHeight;
+            const videoRatio = videoWidth / videoHeight;
+            const targetRatio = 720 / 1280;
+            let sx = 0, sy = 0, sw = videoWidth, sh = videoHeight;
+            if (videoRatio > targetRatio) { sw = videoHeight * targetRatio; sx = (videoWidth - sw) / 2; } 
+            else { sh = videoWidth / targetRatio; sy = (videoHeight - sh) / 2; }
+            
+            ctx.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+            ctx.setTransform(1, 0, 0, 1, 0, 0); // 還原翻轉
+
+            // 畫上濾鏡
+            if (filterImg.complete) {
+                ctx.drawImage(filterImg, 0, 0, canvas.width, canvas.height);
+            }
+            
+            requestAnimationFrame(drawFrame);
+        }
+        video.addEventListener('play', drawFrame);
+
+        // 3. 功能：拍照按鈕
+        photoBtn.addEventListener('click', () => {
+            if (isRecording) return;
+            previewVideo.style.display = 'none';
+            downloadBtn.style.display = 'none';
+            
+            previewImg.src = canvas.toDataURL('image/jpeg', 0.9);
+            previewImg.style.display = 'block';
+            tipText.innerHTML = "💡 拍照成功！請【長按圖片】選擇儲存到手機相簿";
+            previewModal.style.display = 'flex';
+        });
+
+        // 4. 功能：錄影按鈕（點第一下開始，點第二下停止）
+        videoBtn.addEventListener('click', () => {
+            if (!isRecording) {
+                // 開始錄影
+                isRecording = true;
+                recordedChunks = [];
+                videoBtn.innerHTML = "停止";
+                videoBtn.classList.add('recording');
+
+                // 從隱藏畫布擷取 30fps 的影像流
+                const canvasStream = canvas.captureStream(30);
+                
+                // 把原本麥克風的聲音軌道加進去
+                if (localStream.getAudioTracks().length > 0) {
+                    canvasStream.addTrack(localStream.getAudioTracks()[0]);
+                }
+
+                // 設定錄影格式 (優先使用 mp4，不支援則用 webm)
+                let options = { mimeType: 'video/mp4;codecs=h244' };
+                if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+                    options = { mimeType: 'video/webm;codecs=vp9' };
+                }
+
+                mediaRecorder = new MediaRecorder(canvasStream, options);
+                mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+                
+                mediaRecorder.onstop = () => {
+                    previewImg.style.display = 'none';
+                    
+                    const blob = new Blob(recordedChunks, { type: options.mimeType });
+                    const videoURL = URL.createObjectURL(blob);
+                    
+                    previewVideo.src = videoURL;
+                    previewVideo.style.display = 'block';
+                    
+                    downloadBtn.href = videoURL;
+                    // 自動判定副檔名
+                    downloadBtn.download = options.mimeType.includes('mp4') ? 'my-video.mp4' : 'my-video.webm';
+                    downloadBtn.style.display = 'block';
+                    
+                    tipText.innerHTML = "💡 錄影成功！請點選下方綠色按鈕下載影片。";
+                    previewModal.style.display = 'flex';
+                };
+
+                mediaRecorder.start();
+            } else {
+                // 停止錄影
+                isRecording = false;
+                videoBtn.innerHTML = "錄影";
+                videoBtn.classList.remove('recording');
+                mediaRecorder.stop();
+            }
+        });
+
+        // 5. 返回重拍
+        closeBtn.addEventListener('click', () => {
+            previewModal.style.display = 'none';
+            previewVideo.pause();
+        });
+    </script>
+</body>
+</html>
